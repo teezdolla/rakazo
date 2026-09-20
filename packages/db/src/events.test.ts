@@ -1,6 +1,7 @@
 import type { RealtimeFanout } from "@rakazo/adapter-kit";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
+import type { SendUserMessageInput } from "./events.js";
 import {
   answerRunInput,
   answerWaitingRunWithTextInTransaction,
@@ -1690,77 +1691,81 @@ describe("answerRunInput", () => {
 });
 
 describe("sendUserMessage", () => {
-  it("creates the message, run, and event in one transaction and publishes once", async () => {
-    const fanout = new TestFanout();
-    const publish = vi.spyOn(fanout, "publish");
-    const tx = {
-      thread: {
-        update: vi
-          .fn()
-          .mockResolvedValueOnce({ nextMessageSeq: 5 })
-          .mockResolvedValueOnce({ nextEventSeq: 9 }),
-      },
-      message: {
-        create: vi.fn().mockResolvedValue({ id: "message-1", seq: 4 }),
-        update: vi.fn(),
-      },
-      task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
-      run: {
-        create: vi.fn().mockResolvedValue({ id: "run-1" }),
-        findFirst: vi.fn().mockResolvedValue(null),
-        findUnique: vi.fn().mockResolvedValue({ status: "queued" }),
-      },
-      event: {
-        create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
-          ...event(data.seq),
-          type: data.type,
-          runId: "run-1",
-        })),
-      },
-    };
-    const prisma = {
-      message: { findUnique: vi.fn().mockResolvedValue(null) },
-      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
-    } as unknown as PrismaClient;
-
-    await expect(
-      sendUserMessage(
-        prisma,
-        {
-          spaceId: "workspace-1",
-          threadId: "thread-1",
-          botId: "bot-1",
-          userId: "user-1",
-          blocks: [{ kind: "text", text: "hello" }],
-          prompt: "hello",
-          trigger: "user",
-          clientNonce: "nonce-1",
-          linkMessageToRun: true,
+  it.each([undefined, true])(
+    "creates the message, run, and event atomically (requireNewRun: %s)",
+    async (requireNewRun) => {
+      const fanout = new TestFanout();
+      const publish = vi.spyOn(fanout, "publish");
+      const tx = {
+        thread: {
+          update: vi
+            .fn()
+            .mockResolvedValueOnce({ nextMessageSeq: 5 })
+            .mockResolvedValueOnce({ nextEventSeq: 9 }),
         },
-        fanout,
-      ),
-    ).resolves.toEqual({ messageId: "message-1", seq: 4, taskId: "task-1", runId: "run-1" });
+        message: {
+          create: vi.fn().mockResolvedValue({ id: "message-1", seq: 4 }),
+          update: vi.fn(),
+        },
+        task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
+        run: {
+          create: vi.fn().mockResolvedValue({ id: "run-1" }),
+          findFirst: vi.fn().mockResolvedValue(null),
+          findUnique: vi.fn().mockResolvedValue({ status: "queued" }),
+        },
+        event: {
+          create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
+            ...event(data.seq),
+            type: data.type,
+            runId: "run-1",
+          })),
+        },
+      };
+      const prisma = {
+        message: { findUnique: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
 
-    expect(tx.run.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          trigger: "user",
-          clientNonce: "send:message-1",
-          sourceMessageId: "message-1",
+      await expect(
+        sendUserMessage(
+          prisma,
+          {
+            spaceId: "workspace-1",
+            threadId: "thread-1",
+            botId: "bot-1",
+            userId: "user-1",
+            blocks: [{ kind: "text", text: "hello" }],
+            prompt: "hello",
+            trigger: "user",
+            clientNonce: "nonce-1",
+            linkMessageToRun: true,
+            requireNewRun,
+          },
+          fanout,
+        ),
+      ).resolves.toEqual({ messageId: "message-1", seq: 4, taskId: "task-1", runId: "run-1" });
+
+      expect(tx.run.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            trigger: "user",
+            clientNonce: "send:message-1",
+            sourceMessageId: "message-1",
+          }),
         }),
-      }),
-    );
-    expect(tx.message.update).toHaveBeenCalledWith({
-      where: { id: "message-1" },
-      data: { runId: "run-1" },
-    });
-    expect(tx.event.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ type: "thread.message.created", runId: "run-1" }),
-      }),
-    );
-    expect(publish).toHaveBeenCalledWith("thread:thread-1", JSON.stringify({ cursor: 8 }));
-  });
+      );
+      expect(tx.message.update).toHaveBeenCalledWith({
+        where: { id: "message-1" },
+        data: { runId: "run-1" },
+      });
+      expect(tx.event.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: "thread.message.created", runId: "run-1" }),
+        }),
+      );
+      expect(publish).toHaveBeenCalledWith("thread:thread-1", JSON.stringify({ cursor: 8 }));
+    },
+  );
 
   it("persists steering instead of starting a parallel run when the bot is busy", async () => {
     const tx = {
@@ -1814,6 +1819,149 @@ describe("sendUserMessage", () => {
       data: { messageId: "message-1", botId: "bot-1", userId: "user-1", runId: "run-0" },
     });
   });
+
+  it.each([undefined, false])(
+    "rolls back instead of steering when a new run is required (createRun: %s)",
+    async (createRun) => {
+      const input: SendUserMessageInput = {
+        spaceId: "workspace-1",
+        threadId: "thread-1",
+        botId: "bot-1",
+        userId: "user-1",
+        blocks: [{ kind: "text", text: "assignment" }],
+        prompt: "assignment",
+        trigger: "follow_up",
+        clientNonce: "assignment-1",
+        requireNewRun: true,
+        createRun,
+      };
+      const fanout = new TestFanout();
+      const publish = vi.spyOn(fanout, "publish");
+      const tx = {
+        thread: { update: vi.fn().mockResolvedValue({ nextMessageSeq: 5, nextEventSeq: 9 }) },
+        message: {
+          create: vi.fn().mockResolvedValue({ id: "message-1", seq: 4 }),
+          update: vi.fn(),
+        },
+        task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
+        run: {
+          findFirst: vi.fn().mockResolvedValue({ id: "run-0", taskId: "task-0" }),
+          create: vi.fn().mockResolvedValue({ id: "run-1" }),
+          findUnique: vi.fn().mockResolvedValue({ status: "running" }),
+        },
+        steeringMessage: { create: vi.fn() },
+        event: { create: vi.fn().mockResolvedValue(event(8)) },
+      };
+      const commit = vi.fn();
+      const prisma = {
+        message: { findUnique: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => {
+          const result = await callback(tx);
+          commit();
+          return result;
+        }),
+      } as unknown as PrismaClient;
+
+      await expect(sendUserMessage(prisma, input, fanout)).rejects.toThrow(
+        "ASSIGNMENT_REQUIRES_NEW_RUN",
+      );
+      expect(commit).not.toHaveBeenCalled();
+      expect(tx.steeringMessage.create).not.toHaveBeenCalled();
+      expect(tx.task.create).not.toHaveBeenCalled();
+      expect(tx.run.create).not.toHaveBeenCalled();
+      expect(tx.event.create).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+
+      if (createRun !== false) {
+        // A retry with the same nonce can succeed after the active run finishes.
+        tx.run.findFirst.mockResolvedValue(null);
+        await expect(sendUserMessage(prisma, input, fanout)).resolves.toMatchObject({
+          taskId: "task-1",
+          runId: "run-1",
+        });
+        expect(commit).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "rejects a nonce without an owned run, including a concurrent winner (%s)",
+    async (concurrent) => {
+      const message = { id: "message-1", seq: 4, runId: "busy-run", sourceRuns: [] };
+      const findUnique = vi.fn().mockResolvedValue(message);
+      if (concurrent) findUnique.mockResolvedValueOnce(null);
+      const prisma = {
+        message: { findUnique },
+        run: { findUnique: vi.fn().mockResolvedValue({ id: "busy-run" }) },
+        $transaction: vi.fn().mockRejectedValue(new Error("unique nonce conflict")),
+      } as unknown as PrismaClient;
+
+      await expect(
+        sendUserMessage(prisma, {
+          spaceId: "workspace-1",
+          threadId: "thread-1",
+          botId: "bot-1",
+          userId: "user-1",
+          blocks: [{ kind: "text", text: "assignment" }],
+          prompt: "assignment",
+          trigger: "follow_up",
+          clientNonce: "assignment-1",
+          requireNewRun: true,
+        }),
+      ).rejects.toThrow("ASSIGNMENT_NONCE_HAS_NO_OWNED_RUN");
+      expect(prisma.run.findUnique).not.toHaveBeenCalled();
+      expect(prisma.$transaction).toHaveBeenCalledTimes(concurrent ? 1 : 0);
+    },
+  );
+
+  it.each([undefined, "botId", "spaceId", "threadId", "userId"] as const)(
+    "replays only the source-owned assignment for the intended caller (%s)",
+    async (mismatch) => {
+      const input: SendUserMessageInput = {
+        spaceId: "workspace-1",
+        threadId: "thread-1",
+        botId: "bot-1",
+        userId: "user-1",
+        blocks: [{ kind: "text", text: "assignment" }],
+        prompt: "assignment",
+        trigger: "follow_up",
+        clientNonce: "assignment-1",
+        requireNewRun: true,
+      };
+      const sourceRun = {
+        id: "run-1",
+        taskId: "task-1",
+        spaceId: input.spaceId,
+        threadId: input.threadId,
+        botId: input.botId,
+        userId: input.userId,
+        ...(mismatch ? { [mismatch]: "another-owner" } : {}),
+      };
+      const prisma = {
+        message: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: "message-1",
+            seq: 4,
+            runId: null,
+            sourceRuns: [sourceRun],
+          }),
+        },
+        $transaction: vi.fn(),
+      } as unknown as PrismaClient;
+      const result = sendUserMessage(prisma, input);
+      if (mismatch) {
+        await expect(result).rejects.toThrow("ASSIGNMENT_NONCE_HAS_NO_OWNED_RUN");
+      } else {
+        await expect(result).resolves.toEqual({
+          messageId: "message-1",
+          seq: 4,
+          taskId: "task-1",
+          runId: "run-1",
+        });
+      }
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("claimSteering", () => {
