@@ -188,6 +188,9 @@ export interface AnswerRunInput {
   answer: string;
 }
 
+/** Lets assignment clients fail closed against older implementations that ignore unknown input. */
+export const SEND_USER_MESSAGE_REQUIRE_NEW_RUN_SUPPORTED = true;
+
 export interface SendUserMessageInput {
   spaceId: string;
   threadId: string;
@@ -202,6 +205,8 @@ export interface SendUserMessageInput {
   createRun?: boolean;
   /** When true, start a new run even if the bot is already busy (team-chat delivery). */
   allowParallelRun?: boolean;
+  /** Require a source-owned run; roll back a busy send instead of turning it into steering. */
+  requireNewRun?: boolean;
 }
 
 export interface SendUserMessageResult {
@@ -350,6 +355,16 @@ export async function sendUserMessage(
     });
     if (!message) return null;
     const created = message.sourceRuns[0];
+    if (
+      input.requireNewRun &&
+      (!created ||
+        created.spaceId !== input.spaceId ||
+        created.threadId !== input.threadId ||
+        created.botId !== input.botId ||
+        created.userId !== input.userId)
+    ) {
+      throw new Error("ASSIGNMENT_NONCE_HAS_NO_OWNED_RUN");
+    }
     const run =
       created ??
       (message.runId ? await prisma.run.findUnique({ where: { id: message.runId } }) : null);
@@ -390,6 +405,11 @@ export async function sendUserMessage(
               select: { id: true, taskId: true },
             })
           : null;
+      if (input.requireNewRun && (!createRun || busy)) {
+        // Keep this check under the message's thread lock. Throwing rolls back its nonce and
+        // sequence too, allowing the same assignment to retry after the active run finishes.
+        throw new Error("ASSIGNMENT_REQUIRES_NEW_RUN");
+      }
       let task = null;
       let run = null;
       if (createRun && !busy) {
