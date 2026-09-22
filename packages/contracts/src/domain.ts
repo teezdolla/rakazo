@@ -162,6 +162,7 @@ export const SpaceBotSchema = BotSchema.pick({
   pinned: true,
   sectionId: true,
   unread: true,
+  parentBotId: true,
   preview: true,
   status: true,
   updatedAt: true,

@@ -134,16 +134,19 @@ describe("request_secret parameters", () => {
   it("exposes OpenAI-compatible parameters.type object for local servers", () => {
     // LM Studio and similar validators reject tools[].function.parameters without
     // type === "object" (and often without properties). request_secret is the
-    // builtin that previously serialized as a bare anyOf union.
+    // builtin that previously serialized as a bare anyOf union. Anthropic rejects
+    // a root union outright, so the wire shape is one object with both destinations;
+    // the executor still enforces credential XOR connectionId.
     const wire = JSON.parse(JSON.stringify(parametersFor(toolNamed("request_secret")))) as {
       type?: unknown;
-      properties?: unknown;
+      properties?: Record<string, unknown>;
       anyOf?: unknown[];
       oneOf?: unknown[];
     };
     expect(wire.type).toBe("object");
-    expect(wire.properties).toEqual({});
-    expect((wire.anyOf ?? wire.oneOf ?? []).length).toBe(2);
+    expect(wire.properties).toHaveProperty("credential");
+    expect(wire.properties).toHaveProperty("connectionId");
+    expect(wire.anyOf ?? wire.oneOf).toBeUndefined();
   });
 });
 

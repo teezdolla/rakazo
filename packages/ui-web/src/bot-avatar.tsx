@@ -1,9 +1,11 @@
 import type { GrokColorDef } from "@rakazo/core";
 import {
   ACTIVE_RUN_STATUSES,
+  avatarIdentitySeed,
   DEFAULT_GROK_BOT_COLOR,
   GROK_BOT_COLORS,
   GROK_COLOR_LIST,
+  organicAvatarPath,
   resolvePersonaColorDef,
   SHIPPED_BOT_AVATAR_CENTER,
   SHIPPED_BOT_AVATAR_SHAPE_KEYS,
@@ -12,7 +14,11 @@ import {
   shippedBotAvatarShapePath,
   shippedHash,
 } from "@rakazo/core";
-import { memo, useId, useMemo } from "react";
+import { tokens } from "@rakazo/ui-tokens";
+import type { CSSProperties } from "react";
+import { memo, useId, useMemo, useSyncExternalStore } from "react";
+import type { AvatarStyle } from "./avatar-style.js";
+import { useAvatarStyle } from "./avatar-style.js";
 import { cn } from "./lib/utils.js";
 import "./styles.css";
 
@@ -78,7 +84,7 @@ export interface BotAvatarProps {
   status?: string;
   identity?: string;
   className?: string;
-  variant?: unknown;
+  variant?: AvatarStyle;
 }
 
 export const BotAvatar = memo(function BotAvatar({
@@ -87,9 +93,11 @@ export const BotAvatar = memo(function BotAvatar({
   status,
   identity = "",
   className,
+  variant,
 }: BotAvatarProps) {
   const id = useId().replace(/[^a-zA-Z0-9-_]/g, "");
   const isWorking = ACTIVE_RUN_STATUSES.some((s) => s === status);
+  const preferredVariant = useAvatarStyle();
 
   const parsed = useMemo(() => parseBotAvatar(color, identity), [color, identity]);
   const effectiveId = identity || parsed.color || "agent";
@@ -147,6 +155,18 @@ export const BotAvatar = memo(function BotAvatar({
         ) : null}
         <img src={parsed.imageUrl} alt="" className="h-full w-full object-cover" />
       </div>
+    );
+  }
+
+  if (parsed.shapeIndex === undefined && (variant ?? preferredVariant) === "organic") {
+    return (
+      <OrganicAvatar
+        color={colorDef.hex}
+        identity={effectiveId}
+        size={size}
+        isWorking={isWorking}
+        className={className}
+      />
     );
   }
 
@@ -226,6 +246,97 @@ export const BotAvatar = memo(function BotAvatar({
     </div>
   );
 });
+
+function OrganicAvatar({
+  color,
+  identity,
+  size,
+  isWorking,
+  className,
+}: {
+  color: string;
+  identity?: string;
+  size: number;
+  isWorking: boolean;
+  className?: string;
+}) {
+  const reducedMotion = useSyncExternalStore(
+    subscribeToReducedMotion,
+    reducedMotionSnapshot,
+    () => false,
+  );
+  const seed = avatarIdentitySeed(identity || color || DEFAULT_GROK_BOT_COLOR);
+  const duration = `${4.8 + (seed % 24) / 10}s`;
+  const shapeA = organicAvatarPath(seed);
+  const shapeB = organicAvatarPath(seed, 0.42);
+
+  return (
+    <svg
+      viewBox="-60 -60 120 120"
+      aria-hidden="true"
+      className={cn("rakazo-organic-avatar overflow-visible select-none", className)}
+      data-working={isWorking}
+      data-shape-family={seed % 10}
+      data-eye-pattern={seed % 4}
+      style={{
+        width: size,
+        height: size,
+        flex: "none",
+      }}
+    >
+      {(["idle", "working"] as const).map((mode) => (
+        <path
+          key={mode}
+          className={`rakazo-organic-avatar-body rakazo-organic-avatar-body-${mode}`}
+          d={shapeA}
+          fill={color}
+          style={
+            {
+              "--rakazo-organic-path": `path("${shapeA}")`,
+              filter:
+                mode === "working"
+                  ? `drop-shadow(0 0 ${Math.round(size * 0.16)}px ${color})`
+                  : "drop-shadow(0 2px 3px rgba(0,0,0,.34))",
+            } as CSSProperties
+          }
+        >
+          {!reducedMotion ? (
+            <animate
+              attributeName="d"
+              values={`${shapeA};${shapeB};${shapeA}`}
+              dur={duration}
+              repeatCount="indefinite"
+            />
+          ) : null}
+        </path>
+      ))}
+      <g transform={`rotate(${(seed % 9) - 4})`}>
+        {(["idle", "working"] as const).map((mode) => (
+          <g
+            key={mode}
+            className={`rakazo-organic-avatar-eyes rakazo-organic-avatar-eyes-${mode}`}
+            fill={tokens.background}
+          >
+            <rect x="-14" y="-12" width="7" height="24" rx="3.5" />
+            <rect x="7" y="-12" width="7" height="24" rx="3.5" />
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+const reducedMotionMedia = "(prefers-reduced-motion: reduce)";
+
+function reducedMotionSnapshot(): boolean {
+  return window.matchMedia(reducedMotionMedia).matches;
+}
+
+function subscribeToReducedMotion(onChange: () => void): () => void {
+  const media = window.matchMedia(reducedMotionMedia);
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+}
 
 export function GrokShapePreview({
   shapeIndex,

@@ -581,4 +581,9 @@ export const ZH_MESSAGES: Record<string, string> = {
   "Extra high": "超高",
   Low: "低",
   High: "高",
+
+  "This device": "本设备",
+  "On · Free, works offline": "已开启 · 免费，可离线使用",
+  "Your phone's built-in voice. Free, no account needed": "手机自带的语音。免费，无需账户",
+  "Could not save that preference": "无法保存该设置",
 };

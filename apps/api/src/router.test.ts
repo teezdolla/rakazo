@@ -402,6 +402,88 @@ describe("MCP server deletion", () => {
   });
 });
 
+describe("connections.begin", () => {
+  it("reuses a revoked row for the same provider instead of inserting a duplicate", async () => {
+    const begin = vi.fn().mockResolvedValue({ state: "gmail-state", authorizationUrl: null });
+    const update = vi.fn().mockResolvedValue({
+      id: "conn-old",
+      connectorId: "composio",
+      provider: "gmail",
+      displayName: "Gmail",
+      status: "pending",
+      createdAt: new Date("2026-08-26T00:00:00.000Z"),
+    });
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const create = vi.fn();
+    const prisma = {
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+        const tx = {
+          $executeRaw: vi.fn().mockResolvedValue(undefined),
+          connection: {
+            findMany: vi.fn().mockResolvedValue([{ id: "conn-old", status: "revoked" }]),
+            update,
+            updateMany,
+            create,
+          },
+        };
+        return fn(tx);
+      }),
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      connectors: {
+        managed: vi.fn(() => ({ begin })),
+      },
+      env: {
+        defaultProvider: "fake",
+        defaultModel: "fake-model",
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "fake",
+      },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const actor = {
+      spaceId: "workspace-1",
+      userId: "user-1",
+      email: "user@rakazo.test",
+      isDeploymentOwner: true,
+    } satisfies Actor;
+    const handler = new RPCHandler(createRouter(deps));
+
+    const { matched, response } = await handler.handle(
+      new Request("http://127.0.0.1/rpc/connections/begin", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          json: {
+            connectorId: "composio",
+            provider: "gmail",
+            displayName: "Gmail",
+          },
+        }),
+      }),
+      { prefix: "/rpc", context: { actor } },
+    );
+
+    expect(matched).toBe(true);
+    expect(response.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "conn-old" },
+      data: {
+        displayName: "Gmail",
+        status: "pending",
+        providerRef: null,
+        metadata: {},
+      },
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      json: { connectionId: "conn-old" },
+    });
+  });
+});
+
 describe("connections.complete", () => {
   it("forwards an optional code to the managed connector", async () => {
     const complete = vi.fn().mockResolvedValue({ connectionRef: "gmail" });

@@ -244,6 +244,7 @@ export async function createApp(
       stdioEnabled: env.mcpStdioEnabled,
       allowedCommands: env.mcpStdioAllowedCommands,
       network: remoteConnectors,
+      events,
     },
     mcpOAuth,
   );

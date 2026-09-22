@@ -1,7 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { plainTextFromMarkdown, truncatedPlainText } from "./markdown-plain.js";
 
 describe("plainTextFromMarkdown", () => {
+  it("does not rebuild the placeholder pattern for each escaped character", () => {
+    const markerText = "\uE000".repeat(128);
+    const source = `${markerText}${"\\*".repeat(128)} <_ops_@example.test>`;
+    let compiledPatterns = 0;
+    vi.stubGlobal(
+      "RegExp",
+      new Proxy(RegExp, {
+        construct(target, args) {
+          compiledPatterns += 1;
+          return Reflect.construct(target, args);
+        },
+      }),
+    );
+    try {
+      expect(plainTextFromMarkdown(source)).toBe(
+        `${markerText}${"*".repeat(128)} _ops_@example.test`,
+      );
+      expect(compiledPatterns).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it.each([
     "Saved monthly_sales_report.csv",
     "Set DATABASE_POOL_SIZE to 12",
@@ -76,6 +98,18 @@ describe("plainTextFromMarkdown", () => {
       "Open https://example.com/a_(b) now",
     );
     expect(plainTextFromMarkdown("<user@example.com>")).toBe("user@example.com");
+  });
+
+  it.each([
+    ["<https://example.test/_draft_>", "https://example.test/_draft_"],
+    ["<_ops_@example.test>", "_ops_@example.test"],
+    ["<https://example.test/*draft*/~~old~~>", "https://example.test/*draft*/~~old~~"],
+    ["**Contact** <_ops_@example.test> _today_", "Contact _ops_@example.test today"],
+    ["_<https://example.test/_draft_>_", "https://example.test/_draft_"],
+    ["<https://example.test/\\_draft\\_>", "https://example.test/_draft_"],
+    ["`<https://example.test/_draft_>`", "<https://example.test/_draft_>"],
+  ])("keeps autolink destinations literal: %s", (source, expected) => {
+    expect(plainTextFromMarkdown(source)).toBe(expected);
   });
 
   it("keeps inline code contents", () => {

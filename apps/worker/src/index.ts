@@ -107,6 +107,7 @@ async function main() {
         .split(",")
         .map((v) => v.trim())
         .filter(Boolean),
+      events,
     },
     mcpOAuth,
   );

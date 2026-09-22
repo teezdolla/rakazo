@@ -49,6 +49,14 @@ describe("inferScript message_bot", () => {
   });
 });
 
+describe("inferScript quote markdown fixture", () => {
+  it("returns the markdown fixture including the caller marker", () => {
+    expect(inferScript("quote markdown fixture md-stamp")[0]?.assistant).toContain(
+      "md-stamp\n1. list-a",
+    );
+  });
+});
+
 describe("inferScript request_secret", () => {
   it("opens a masked api key card via request_secret", () => {
     expect(inferScript("show a secret card for a masked api key")).toEqual([

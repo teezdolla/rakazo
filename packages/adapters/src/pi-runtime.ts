@@ -1181,7 +1181,8 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
 /** Build AgentTool.parameters for a connector tool, including OpenAI wire fidelity. */
 export function parametersFor(tool: ConnectorTool) {
   const schema = builtinParameters(tool) ?? safeJsonSchemaParameters(tool);
-  // Type.Union (top-level oneOf/anyOf) serializes without type/properties.
+  // Type.Union (top-level oneOf/anyOf) serializes without type/properties, and
+  // Anthropic rejects a root union, so it is flattened into one object schema.
   // Re-wrap only when needed so Type.Object schemas keep TypeBox Kind metadata.
   if (!openAiToolParametersNeedNormalization(schema)) return schema;
   return Type.Unsafe(
@@ -1365,6 +1366,11 @@ function isAgentToolExecutionResult(result: unknown): result is AgentToolExecuti
 export function jsonSchemaParameters(
   schema: Record<string, unknown>,
 ): ReturnType<typeof Type.Object> {
+  // Keep intersections intact until parametersFor flattens root combinators.
+  // Rebuilding only properties here drops allOf-only fields and their constraints.
+  if (Array.isArray(schema.allOf)) {
+    return Type.Unsafe(schema) as unknown as ReturnType<typeof Type.Object>;
+  }
   // Top-level oneOf/anyOf (e.g. request_secret's credential XOR connectionId)
   // must stay a union. Falling through to properties would drop the exclusivity
   // and re-expose both destinations as optional siblings.

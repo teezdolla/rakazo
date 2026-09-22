@@ -1511,6 +1511,7 @@ describe("sendThreadMessage", () => {
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "parent",
+          role: "bot",
           blocks: [{ kind: "text", text: "the parent says just this span inside it" }],
         }),
         update: vi.fn(),
@@ -1564,7 +1565,7 @@ describe("sendThreadMessage", () => {
     expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
     expect(tx.message.findFirst).toHaveBeenCalledWith({
       where: { id: "parent", threadId: "thread-1" },
-      select: { id: true, blocks: true },
+      select: { id: true, blocks: true, role: true },
     });
     expect(tx.message.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -1579,7 +1580,7 @@ describe("sendThreadMessage", () => {
     });
   });
 
-  it("drops a quote excerpt that doesn't match the parent's text", async () => {
+  it("drops a quote excerpt when the parent's persisted blocks are malformed", async () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
@@ -1591,7 +1592,8 @@ describe("sendThreadMessage", () => {
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "parent",
-          blocks: [{ kind: "text", text: "the parent says something else entirely" }],
+          role: "bot",
+          blocks: [null],
         }),
         update: vi.fn(),
         create: vi.fn().mockResolvedValue({
@@ -1668,6 +1670,7 @@ describe("sendThreadMessage", () => {
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "parent",
+          role: "bot",
           // Rendered as "42% growth", stored with markdown source.
           blocks: [{ kind: "text", text: "we saw **42%** growth last week" }],
         }),
@@ -1726,99 +1729,116 @@ describe("sendThreadMessage", () => {
   });
 
   it.each([
-    ["table cells", "| Name | Value |\n|:-----|------:|\n| Alice | 5 |", "Alice 5"],
-    ["indented code", "    2. restart()", "2. restart()"],
-    ["fenced code", "```text\n2. restart()\n```", "2. restart()"],
-    ["lists after code fences", "```text\n1. code\n```\n1. First\n2. Second", "First\nSecond"],
-    ["tab-indented code", "\t2. restart()", "2. restart()"],
-    ["three-space lists", "   1. First\n   2. Second", "First\nSecond"],
+    ["table cells", "| Name | Value |\n|:-----|------:|\n| Alice | 5 |", "Alice 5", "Alice 5"],
+    ["indented code", "    2. restart()", "2. restart()", "2. restart()"],
+    ["fenced code", "```text\n2. restart()\n```", "2. restart()", "2. restart()"],
+    [
+      "lists after code fences",
+      "```text\n1. code\n```\n1. First\n2. Second",
+      "First\nSecond",
+      "First\nSecond",
+    ],
+    ["tab-indented code", "\t2. restart()", "2. restart()", "2. restart()"],
+    ["three-space lists", "   1. First\n   2. Second", "First\nSecond", "First\nSecond"],
     [
       "ordered list items",
       "1. Review the diff\n2. Run the tests",
+      "Review the diff Run the tests",
       "Review the diff\nRun the tests",
     ],
     [
       "parenthesized list items",
       "1) Review the diff\n2) Run the tests",
       "Review the diff\nRun the tests",
+      "Review the diff\nRun the tests",
     ],
     [
       "quoted list items",
       "> 1. Review the diff\n> 2. Run the tests",
       "Review the diff\nRun the tests",
+      "Review the diff\nRun the tests",
     ],
-  ])("accepts a quote excerpt spanning rendered %s", async (_name, parentText, replyQuote) => {
-    let messageSeq = 0;
-    let eventSeq = 0;
-    const tx = {
-      thread: {
-        update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
-          data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
-        ),
-      },
-      message: {
-        findFirst: vi.fn().mockResolvedValue({
-          id: "parent",
-          blocks: [
-            {
-              kind: "text",
-              text: parentText,
-            },
-          ],
-        }),
-        update: vi.fn(),
-        create: vi.fn().mockResolvedValue({
-          id: "msg-1",
-          threadId: "thread-1",
-          seq: 1,
-          role: "user",
-          blocks: [{ kind: "text", text: "why this?" }],
-          botId: null,
+  ])(
+    "derives a quote excerpt spanning rendered %s",
+    async (_name, parentText, requestedQuote, expectedQuote) => {
+      let messageSeq = 0;
+      let eventSeq = 0;
+      const tx = {
+        thread: {
+          update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
+            data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
+          ),
+        },
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "parent",
+            role: "bot",
+            blocks: [
+              {
+                kind: "text",
+                text: parentText,
+              },
+            ],
+          }),
+          update: vi.fn(),
+          create: vi.fn().mockResolvedValue({
+            id: "msg-1",
+            threadId: "thread-1",
+            seq: 1,
+            role: "user",
+            blocks: [{ kind: "text", text: "why this?" }],
+            botId: null,
+            replyToMessageId: "parent",
+            replyQuote: expectedQuote,
+            runId: null,
+            createdAt: new Date(),
+          }),
+        },
+        run: {
+          findMany: vi.fn().mockResolvedValue([]),
+          findUnique: vi.fn().mockResolvedValue({ status: "queued", startedAt: null }),
+          create: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1", status: "queued" }),
+        },
+        task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
+        event: {
+          create: vi.fn().mockResolvedValue({ id: "event-1", seq: 1, createdAt: new Date() }),
+        },
+        steeringMessage: { create: vi.fn() },
+      };
+      const prisma = {
+        message: { findUnique: vi.fn().mockResolvedValue(null) },
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+      const actor = { spaceId: "workspace-1", userId: "user-1" } as Actor;
+      const target = { kind: "bot", botId: "bot-1", threadId: "thread-1" } as ThreadTarget;
+
+      const result = await sendThreadMessage(
+        {
+          prisma,
+          events: { notify: vi.fn().mockResolvedValue(undefined) } as never,
+          jobs: { enqueue: vi.fn().mockResolvedValue(undefined) } as never,
+        },
+        actor,
+        target,
+        {
+          text: "why this?",
           replyToMessageId: "parent",
-          replyQuote,
-          runId: null,
-          createdAt: new Date(),
+          replyQuote: requestedQuote,
+          clientNonce: "nonce-1",
+        },
+      );
+
+      expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
+      expect(tx.message.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ replyQuote: expectedQuote }),
+      });
+      expect(tx.event.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({ replyQuote: expectedQuote }),
         }),
-      },
-      run: {
-        findMany: vi.fn().mockResolvedValue([]),
-        findUnique: vi.fn().mockResolvedValue({ status: "queued", startedAt: null }),
-        create: vi.fn().mockResolvedValue({ id: "run-1", taskId: "task-1", status: "queued" }),
-      },
-      task: { create: vi.fn().mockResolvedValue({ id: "task-1" }) },
-      event: {
-        create: vi.fn().mockResolvedValue({ id: "event-1", seq: 1, createdAt: new Date() }),
-      },
-      steeringMessage: { create: vi.fn() },
-    };
-    const prisma = {
-      message: { findUnique: vi.fn().mockResolvedValue(null) },
-      $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
-    } as unknown as PrismaClient;
-    const actor = { spaceId: "workspace-1", userId: "user-1" } as Actor;
-    const target = { kind: "bot", botId: "bot-1", threadId: "thread-1" } as ThreadTarget;
-
-    const result = await sendThreadMessage(
-      {
-        prisma,
-        events: { notify: vi.fn().mockResolvedValue(undefined) } as never,
-        jobs: { enqueue: vi.fn().mockResolvedValue(undefined) } as never,
-      },
-      actor,
-      target,
-      {
-        text: "why this?",
-        replyToMessageId: "parent",
-        replyQuote,
-        clientNonce: "nonce-1",
-      },
-    );
-
-    expect(result).toMatchObject({ runId: "run-1", taskId: "task-1" });
-    expect(tx.message.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ replyQuote }),
-    });
-  });
+      });
+    },
+  );
 
   it("drops a quote excerpt that only matches after stripping punctuation", async () => {
     let messageSeq = 0;
@@ -1832,10 +1852,11 @@ describe("sendThreadMessage", () => {
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "parent",
+          role: "bot",
           blocks: [
             {
               kind: "text",
-              text: "C++ is fast and key:value pairs; version 1.2 and 2. items\n    2. restart()\n```text\n1. alpha\n2. beta\n```\n~~~text\n1. gamma\n2. delta\n~~~\n```text\n> ```\n1. epsilon\n2. zeta\n```\n> ```text\n> > ```\n> 1. eta\n> 2. theta\n> ```\n# 1. heading\n# 2. another heading\n\n    > 1. literal\n    > 2. another literal",
+              text: "C++ is fast and key:value pairs; version 1.2 and 2. items\n    2. restart()\n```text\n1. alpha\n2. beta\n```\n~~~text\n1. gamma\n2. delta\n~~~\n```text\n> ```\n1. epsilon\n2. zeta\n```\n> ```text\n> > ```\n> 1. eta\n> 2. theta\n> ```\n```text\nalpha\n---\nomega\n```\nRead [docs](https://example.test/private)\nAlice\n# 1. heading\n# 2. another heading\n\n    > 1. literal\n    > 2. another literal",
             },
           ],
         }),
@@ -1883,6 +1904,10 @@ describe("sendThreadMessage", () => {
       "gamma\ndelta",
       "epsilon\nzeta",
       "eta\ntheta",
+      "alpha\nomega",
+      "text",
+      "https://example.test/private",
+      "alice",
       "heading\nanother heading",
       "literal\nanother literal",
     ]) {
@@ -1915,6 +1940,7 @@ describe("sendThreadMessage", () => {
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "parent",
+          role: "bot",
           blocks: [{ kind: "text", text: "the parent says just this span inside it" }],
         }),
         update: vi.fn(),

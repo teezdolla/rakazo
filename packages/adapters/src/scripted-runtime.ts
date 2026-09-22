@@ -220,6 +220,27 @@ export function inferScript(
       },
     ];
   }
+  if (lower.includes("quote markdown fixture")) {
+    const marker = /quote markdown fixture\s+(\S+)/i.exec(prompt)?.[1] ?? "md-fixture";
+    return [
+      {
+        assistant: `${marker}
+1. list-a
+2. list-b
+
+| k | v |
+| --- | --- |
+| cell-a | cell-b |
+
+\`\`\`
+code-a
+---
+code-b
+\`\`\``,
+        complete: true,
+      },
+    ];
+  }
   if (
     lower.includes("tappable choices") ||
     lower.includes("choice buttons") ||

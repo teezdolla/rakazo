@@ -1,5 +1,5 @@
 import { useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
+import { loadDeviceVoiceEnabled, saveDeviceVoiceEnabled } from "../lib/device-voice";
 import { useI18n } from "../lib/i18n";
 import { native, useThemedStyles } from "../lib/native";
 import { speakText } from "../lib/voice";
@@ -45,10 +46,16 @@ export default function VoiceSettings() {
   const [provider, setProvider] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [deviceVoice, setDeviceVoice] = useState(false);
+  const [deviceVoiceReady, setDeviceVoiceReady] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<"connect" | "disconnect" | "voice" | "test" | null>(null);
+  const [pending, setPending] = useState<
+    "connect" | "disconnect" | "voice" | "test" | "device-voice" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const deviceVoiceRevision = useRef(0);
+  const deviceVoiceSaveInFlight = useRef(false);
 
   const load = useCallback(async (nextProvider?: string) => {
     const [nextCatalog, nextCredentials, nextStatus] = await Promise.all([
@@ -73,13 +80,47 @@ export default function VoiceSettings() {
   useFocusEffect(
     useCallback(() => {
       setLoading(true);
+      const revision = ++deviceVoiceRevision.current;
+      void loadDeviceVoiceEnabled()
+        .then((value) => {
+          if (deviceVoiceSaveInFlight.current) return;
+          if (deviceVoiceRevision.current !== revision) return;
+          setDeviceVoice(value);
+          setDeviceVoiceReady(true);
+        })
+        .catch((err: unknown) => {
+          if (deviceVoiceSaveInFlight.current) return;
+          if (deviceVoiceRevision.current !== revision) return;
+          setDeviceVoiceReady(true);
+          setError(err instanceof Error ? err.message : t("Could not load voice settings"));
+        });
       void load()
         .catch((err: unknown) =>
           setError(err instanceof Error ? err.message : t("Could not load voice settings")),
         )
         .finally(() => setLoading(false));
-    }, [load]),
+    }, [load, t]),
   );
+
+  async function toggleDeviceVoice() {
+    if (pending !== null || !deviceVoiceReady) return;
+    const next = !deviceVoice;
+    deviceVoiceSaveInFlight.current = true;
+    deviceVoiceRevision.current++;
+    setDeviceVoice(next);
+    setPending("device-voice");
+    setError(null);
+    try {
+      await saveDeviceVoiceEnabled(next);
+    } catch {
+      setDeviceVoice(!next);
+      setError(t("Could not save that preference"));
+    } finally {
+      deviceVoiceSaveInFlight.current = false;
+      deviceVoiceRevision.current++;
+      setPending(null);
+    }
+  }
 
   const selected = catalog.find((entry) => entry.id === provider);
   const credential = credentials.find((entry) => entry.provider === provider);
@@ -154,6 +195,22 @@ export default function VoiceSettings() {
         {loading ? <ActivityIndicator color={native.secondaryLabel} /> : null}
         {error ? <Text style={styles.error}>{error}</Text> : null}
         {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+        <Pressable
+          disabled={pending !== null || !deviceVoiceReady}
+          onPress={() => void toggleDeviceVoice()}
+          style={[
+            styles.card,
+            deviceVoice && styles.cardActive,
+            (pending !== null || !deviceVoiceReady) && styles.disabled,
+          ]}
+        >
+          <Text style={styles.cardTitle}>{t("This device")}</Text>
+          <Text style={styles.cardMeta}>
+            {deviceVoice
+              ? t("On · Free, works offline")
+              : t("Your phone's built-in voice. Free, no account needed")}
+          </Text>
+        </Pressable>
         {catalog.map((entry) => {
           const connected = credentials.some((cred) => cred.provider === entry.id);
           return (
@@ -240,16 +297,16 @@ export default function VoiceSettings() {
                 ))}
               </View>
             ) : null}
-            {status?.ready ? (
-              <Pressable
-                disabled={pending !== null}
-                onPress={() => void testVoice()}
-                style={styles.secondary}
-              >
-                <Text style={styles.secondaryLabel}>{t("Hear a sample")}</Text>
-              </Pressable>
-            ) : null}
           </>
+        ) : null}
+        {deviceVoice || status?.ready ? (
+          <Pressable
+            disabled={pending !== null}
+            onPress={() => void testVoice()}
+            style={styles.secondary}
+          >
+            <Text style={styles.secondaryLabel}>{t("Hear a sample")}</Text>
+          </Pressable>
         ) : null}
       </ScrollView>
     </SafeAreaView>

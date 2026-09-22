@@ -14,6 +14,7 @@ import {
   isNoAuthToolkitError,
   mergeConnectedPlugins,
   needsLivePluginSync,
+  pickReusableConnection,
   planLiveConnectionSync,
   sanitizeComposioError,
 } from "./composio-connector.js";
@@ -260,98 +261,204 @@ describe("composio tool mapping", () => {
     );
   });
 
+  function stubActiveAccounts(ids: string[]) {
+    const previous = composioSdkState.connectedAccounts.list;
+    composioSdkState.connectedAccounts.list = async () => ({
+      items: ids.map((id) => ({ id })),
+    });
+    return () => {
+      composioSdkState.connectedAccounts.list = previous;
+    };
+  }
+
   it("pins every connected account into multi-account execute sessions", async () => {
     composioSdkState.created.length = 0;
     composioSdkState.sessions.clear();
     composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca-personal", "ca-work"]);
 
-    const connector = new ComposioConnector();
-    await connector.discoverTools({
-      operationId: "composio-multi-account",
-      traceId: "composio-multi-account",
-      spaceId: "workspace",
-      userId: "user-1",
-      signal: new AbortController().signal,
-      connectedConnections: [
-        {
-          id: "connection-personal",
-          connectorId: "composio",
-          externalId: "github",
-          displayName: "Personal",
-          providerRef: "ca-personal",
-        },
-        {
-          id: "connection-work",
-          connectorId: "composio",
-          externalId: "GITHUB",
-          displayName: "Work",
-          providerRef: "ca-work",
-        },
-        {
-          id: "connection-personal-dup",
-          connectorId: "composio",
-          externalId: "GitHub",
-          displayName: "Personal again",
-          providerRef: "ca-personal",
-        },
-        {
-          id: "connection-noauth",
-          connectorId: "composio",
-          externalId: "GITHUB",
-          displayName: "Legacy",
-          providerRef: "github",
-        },
-      ],
-    });
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-multi-account",
+        traceId: "composio-multi-account",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-personal",
+            connectorId: "composio",
+            externalId: "github",
+            displayName: "Personal",
+            providerRef: "ca-personal",
+          },
+          {
+            id: "connection-work",
+            connectorId: "composio",
+            externalId: "GITHUB",
+            displayName: "Work",
+            providerRef: "ca-work",
+          },
+          {
+            id: "connection-personal-dup",
+            connectorId: "composio",
+            externalId: "GitHub",
+            displayName: "Personal again",
+            providerRef: "ca-personal",
+          },
+          {
+            id: "connection-noauth",
+            connectorId: "composio",
+            externalId: "GITHUB",
+            displayName: "Legacy",
+            providerRef: "github",
+          },
+        ],
+      });
 
-    expect(composioSdkState.created.at(-1)).toEqual({
-      userId: "user-1",
-      config: {
-        manageConnections: false,
-        sandbox: { enable: false },
-        toolkits: ["GITHUB"],
-        connectedAccounts: { GITHUB: ["ca-personal", "ca-work"] },
-        multiAccount: {
-          enable: true,
-          maxAccountsPerToolkit: 10,
-          requireExplicitSelection: true,
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+          connectedAccounts: { GITHUB: ["ca-personal", "ca-work"] },
+          multiAccount: {
+            enable: true,
+            maxAccountsPerToolkit: 10,
+            requireExplicitSelection: true,
+          },
         },
-      },
-    });
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("drops a dead sibling account id so it cannot poison discovery", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca_current"]);
+
+    try {
+      const connector = new ComposioConnector();
+      await expect(
+        connector.discoverTools({
+          operationId: "composio-dead-sibling",
+          traceId: "composio-dead-sibling",
+          spaceId: "workspace",
+          userId: "user-1",
+          signal: new AbortController().signal,
+          connectedConnections: [
+            {
+              id: "connection-revoked",
+              connectorId: "composio",
+              externalId: "github",
+              displayName: "GitHub",
+              providerRef: "ca_old",
+            },
+            {
+              id: "connection-live",
+              connectorId: "composio",
+              externalId: "github",
+              displayName: "GitHub",
+              providerRef: "ca_current",
+            },
+          ],
+        }),
+      ).resolves.toContainEqual(expect.objectContaining({ name: "GITHUB_GET_REPOS" }));
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+          connectedAccounts: { GITHUB: ["ca_current"] },
+        },
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits stale account ids when the provider lists no ACTIVE accounts", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts([]);
+
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-empty-active",
+        traceId: "composio-empty-active",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-revoked",
+            connectorId: "composio",
+            externalId: "github",
+            displayName: "GitHub",
+            providerRef: "ca_old",
+          },
+        ],
+      });
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+        },
+      });
+    } finally {
+      restore();
+    }
   });
 
   it("pins a single concrete account without enabling multi-account mode", async () => {
     composioSdkState.created.length = 0;
     composioSdkState.sessions.clear();
     composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca-work"]);
 
-    const connector = new ComposioConnector();
-    await connector.discoverTools({
-      operationId: "composio-single-account",
-      traceId: "composio-single-account",
-      spaceId: "workspace",
-      userId: "user-1",
-      signal: new AbortController().signal,
-      connectedConnections: [
-        {
-          id: "connection-work",
-          connectorId: "composio",
-          externalId: "gmail",
-          displayName: "Work",
-          providerRef: "ca-work",
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-single-account",
+        traceId: "composio-single-account",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-work",
+            connectorId: "composio",
+            externalId: "gmail",
+            displayName: "Work",
+            providerRef: "ca-work",
+          },
+        ],
+      });
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GMAIL"],
+          connectedAccounts: { GMAIL: ["ca-work"] },
         },
-      ],
-    });
-
-    expect(composioSdkState.created.at(-1)).toEqual({
-      userId: "user-1",
-      config: {
-        manageConnections: false,
-        sandbox: { enable: false },
-        toolkits: ["GMAIL"],
-        connectedAccounts: { GMAIL: ["ca-work"] },
-      },
-    });
+      });
+    } finally {
+      restore();
+    }
   });
 
   it("omits connectedAccounts and multiAccount for legacy slug-only refs", async () => {
@@ -663,7 +770,7 @@ describe("composio tool mapping", () => {
     ).toEqual({ connectIds: [], revokeIds: [] });
   });
 
-  it("reconnects existing error or revoked rows instead of inserting duplicates", () => {
+  it("reconnects existing error rows instead of inserting duplicates", () => {
     expect(
       planLiveConnectionSync(
         [
@@ -674,8 +781,30 @@ describe("composio tool mapping", () => {
         ["gmail", "slack", "github", "slack"],
       ),
     ).toEqual({
-      connectIds: ["row-err", "row-old"],
+      connectIds: ["row-err"],
       revokeIds: [],
+    });
+  });
+
+  it("does not revive a revoked sibling when a live row shares the provider slug", () => {
+    expect(
+      planLiveConnectionSync(
+        [
+          { id: "row-old", provider: "gmail", status: "revoked", displayName: "Gmail" },
+          { id: "row-live", provider: "gmail", status: "connected", displayName: "Gmail" },
+        ],
+        ["gmail"],
+      ),
+    ).toEqual({ connectIds: [], revokeIds: [] });
+    expect(
+      pickReusableConnection([
+        { id: "row-old", status: "revoked" },
+        { id: "row-live", status: "connected" },
+      ]),
+    ).toBeUndefined();
+    expect(pickReusableConnection([{ id: "row-old", status: "revoked" }])).toEqual({
+      id: "row-old",
+      status: "revoked",
     });
   });
 

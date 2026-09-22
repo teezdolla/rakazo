@@ -122,7 +122,10 @@ export function GeneralSettingsPanels({
         <UiLocalePicker value={locale} onChange={chooseLocale} />
       </section>
 
-      <section className="rounded-xl border border-border px-4 py-4">
+      <section
+        className="rounded-xl border border-border px-4 py-4"
+        data-testid="avatar-style-select"
+      >
         <h3 className="text-[15px] font-medium text-foreground">
           <Trans>Avatars</Trans>
         </h3>
@@ -134,6 +137,7 @@ export function GeneralSettingsPanels({
               pressed={style === avatarStyle}
               disabled={avatarPending}
               onPressedChange={() => void chooseAvatarStyle(style)}
+              data-testid={`avatar-style-${style}`}
               className="h-auto justify-start gap-3 px-3.5 py-3 text-[14px] font-normal"
             >
               <BotAvatar
